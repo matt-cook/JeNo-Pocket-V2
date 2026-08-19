@@ -29,6 +29,9 @@ FRAME_WINDOW = (55.0, -230.0, 178.0, -110.0)
 TOP_PLATE_WINDOW = (290.0, -225.0, 335.0, -115.0)
 M2_CUT_RADIUS = 1.0
 NEW_PATTERN_HALF_SPACING = 10.0
+TALL_PATTERN_HALF_HEIGHT = 17.5
+LOWER_OPENING_BOTTOM = -30.2
+LOWER_OPENING_Y_SCALE = 0.88
 
 
 def bounds(entity):
@@ -107,11 +110,68 @@ def build_dxf():
     importer.import_entities(translated_tank, target_layout=output.modelspace())
     importer.finalize()
 
+    # Compress only the two large openings below the 20 x 35 mm holes. Their
+    # lower ends stay fixed while their upper ends move down about 1.4 mm,
+    # matching the approximately 1.3 mm edge margin at the upper pair.
+    cx, cy = XCORE_CENTER
+    lower_opening_entities = []
+    for entity in output.modelspace():
+        if entity.dxf.layer != "Calque1":
+            continue
+        box = bounds(entity)
+        if not box:
+            continue
+        rel = (
+            box.extmin.x - cx,
+            box.extmin.y - cy,
+            box.extmax.x - cx,
+            box.extmax.y - cy,
+        )
+        in_left = rel[0] >= -10.0 and rel[2] <= -2.0
+        in_right = rel[0] >= 2.0 and rel[2] <= 10.0
+        in_lower_opening = rel[1] >= -31.0 and rel[3] <= -18.0
+        if (in_left or in_right) and in_lower_opening:
+            lower_opening_entities.append(entity)
+
+    anchor_y = cy + LOWER_OPENING_BOTTOM
+    # DXF ARC entities cannot be non-uniformly scaled without becoming
+    # ellipses. Flatten just these small opening fillets first so the complete
+    # loops remain connected after the vertical compression.
+    flattened_opening_entities = []
+    for entity in lower_opening_entities:
+        if entity.dxftype() == "ARC":
+            vertices = list(make_path(entity).flattening(distance=0.01))
+            replacement = output.modelspace().add_lwpolyline(
+                [(vertex.x, vertex.y) for vertex in vertices],
+                dxfattribs={"layer": entity.dxf.layer},
+            )
+            output.modelspace().delete_entity(entity)
+            flattened_opening_entities.append(replacement)
+        else:
+            flattened_opening_entities.append(entity)
+    lower_opening_entities = flattened_opening_entities
+
+    inplace(lower_opening_entities, Matrix44.scale(1.0, LOWER_OPENING_Y_SCALE, 1.0))
+    inplace(
+        lower_opening_entities,
+        Matrix44.translate(0.0, anchor_y * (1.0 - LOWER_OPENING_Y_SCALE), 0.0),
+    )
+
     # Add a conventional 20 x 20 mm M2 mounting square. Relative to the
     # existing 25.5 mm diamond, this pattern is rotated by 45 degrees.
-    cx, cy = XCORE_CENTER
     for x_offset in (-NEW_PATTERN_HALF_SPACING, NEW_PATTERN_HALF_SPACING):
         for y_offset in (-NEW_PATTERN_HALF_SPACING, NEW_PATTERN_HALF_SPACING):
+            output.modelspace().add_circle(
+                (cx + x_offset, cy + y_offset),
+                radius=M2_CUT_RADIUS,
+                dxfattribs={"layer": "Cut"},
+            )
+
+    # Add an aligned 20 x 35 mm pattern. These share the same +/-10 mm
+    # horizontal positions and place the additional holes above and below the
+    # 20 x 20 mm pattern at +/-17.5 mm vertically.
+    for x_offset in (-NEW_PATTERN_HALF_SPACING, NEW_PATTERN_HALF_SPACING):
+        for y_offset in (-TALL_PATTERN_HALF_HEIGHT, TALL_PATTERN_HALF_HEIGHT):
             output.modelspace().add_circle(
                 (cx + x_offset, cy + y_offset),
                 radius=M2_CUT_RADIUS,
